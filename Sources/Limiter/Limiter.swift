@@ -1,13 +1,9 @@
 import Synchronization
 import OrderedCollections
 
-func withTaskCancellationHandler<T>(
-  isolation: isolated (any Actor)? = #isolation,
-  operation: () async throws -> T,
-  onCancel handler: @Sendable () -> Void
-) async rethrows -> T {
-  try await withTaskCancellationHandler(operation: operation, onCancel: handler, isolation: isolation)
-}
+// because of -parse-stdlib to get compiler builtins
+import Swift
+import _Concurrency
 
 public final class AsyncLimiter: Sendable {
   
@@ -22,6 +18,7 @@ public final class AsyncLimiter: Sendable {
     enum EnterAction {
       case resume(Continuation)
       case cancel(Continuation)
+      case escalate([UnsafeCurrentTask])
     }
     
     enum CancelAction {
@@ -32,23 +29,42 @@ public final class AsyncLimiter: Sendable {
       case resume(Continuation)
     }
     
+    enum EscalationAction {
+      case escalate([UnsafeCurrentTask])
+    }
+    
     enum Suspension {
-      case active
-      case suspended(Continuation)
+      case active(UnsafeCurrentTask)
+      case suspended(Continuation, UnsafeCurrentTask)
       case cancelled
     }
     
     let limit: Int
     var suspensions: OrderedDictionary<SuspensionID, Suspension> = [:]
     
-    mutating func enter(id: SuspensionID, continuation: Continuation) -> EnterAction? {
+    mutating func enter(id: SuspensionID, continuation: Continuation, task: UnsafeCurrentTask) -> EnterAction? {
       switch suspensions[id] {
       case .none:
         if suspensions.count >= limit {
-          suspensions[id] = .suspended(continuation)
-          return nil
+          var tasks: [UnsafeCurrentTask] = []
+          for (_, suspension) in suspensions {
+            switch suspension {
+            case .active(let task):
+              tasks.append(task)
+            case .suspended(_, let task):
+              tasks.append(task)
+            case .cancelled:
+              break
+            }
+          }
+          suspensions[id] = .suspended(continuation, task)
+          if tasks.isEmpty {
+            return nil
+          } else {
+            return .escalate(tasks)
+          }
         } else {
-          suspensions[id] = .active
+          suspensions[id] = .active(task)
           return .resume(continuation)
         }
       case .active, .suspended:
@@ -66,7 +82,7 @@ public final class AsyncLimiter: Sendable {
         return nil
       case .active:
         return nil // TODO: not yet covered by unit tests
-      case .suspended(let continuation):
+      case .suspended(let continuation, _):
         suspensions[id] = nil
         return .cancel(continuation)
       case .cancelled:
@@ -85,12 +101,40 @@ public final class AsyncLimiter: Sendable {
         switch suspension.value {
         case .active, .cancelled:
           continue // TODO: not yet covered by unit tests
-        case .suspended(let continuation):
-          suspensions[suspension.key] = .active
+        case .suspended(let continuation, let task):
+          suspensions[suspension.key] = .active(task)
           return .resume(continuation)
         }
       }
       return nil
+    }
+    
+    func escalate(id: SuspensionID) -> EscalationAction? {
+      switch suspensions[id] {
+      case .none, .active, .cancelled:
+        return nil
+      case .suspended:
+        break
+      }
+      var tasks: [UnsafeCurrentTask] = []
+      for suspension in suspensions {
+        if suspension.key == id {
+          break
+        }
+        switch suspension.value {
+        case .active(let task):
+          tasks.append(task)
+        case .suspended(_, let task):
+          tasks.append(task)
+        case .cancelled:
+          break
+        }
+      }
+      if tasks.isEmpty {
+        return nil
+      } else {
+        return .escalate(tasks)
+      }
     }
   }
   
@@ -111,31 +155,53 @@ public final class AsyncLimiter: Sendable {
     
     let id = nextID()
     
-    try await withTaskCancellationHandler(isolation: isolation) {
-      try await withUnsafeThrowingContinuation(isolation: isolation) { continuation in
+    try await withTaskPriorityEscalationHandler(isolation: isolation) {
+      try await withTaskCancellationHandler(isolation: isolation) {
+        try await withUnsafeThrowingContinuation(isolation: isolation) { continuation in
+          
+          let action = state.withLock { state in
+            withUnsafeCurrentTask { task in
+              state.enter(id: id, continuation: continuation, task: task!)
+            }
+          }
+          
+          switch action {
+          case .cancel(let continuation):
+            continuation.resume(throwing: CancellationError())
+          case .resume(let continuation):
+            continuation.resume()
+          case .escalate(let tasks):
+            for task in tasks {
+              UnsafeCurrentTask.escalatePriority(task, to: Task.currentPriority)
+            }
+          case .none:
+            break
+          }
+        }
+      } onCancel: {
         
         let action = state.withLock { state in
-          state.enter(id: id, continuation: continuation)
+          state.cancel(id: id)
         }
         
         switch action {
         case .cancel(let continuation):
           continuation.resume(throwing: CancellationError())
-        case .resume(let continuation):
-          continuation.resume()
         case .none:
           break
         }
       }
-    } onCancel: {
+    } onPriorityEscalated: { priority in
       
       let action = state.withLock { state in
-        state.cancel(id: id)
+        state.escalate(id: id)
       }
       
       switch action {
-      case .cancel(let continuation):
-        continuation.resume(throwing: CancellationError())
+      case .escalate(let tasks):
+        for task in tasks {
+          UnsafeCurrentTask.escalatePriority(task, to: priority)
+        }
       case .none:
         break
       }

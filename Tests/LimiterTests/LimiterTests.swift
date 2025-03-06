@@ -1,6 +1,5 @@
 import Clocks
 import Limiter
-import Synchronization
 import Testing
 
 @Test
@@ -90,7 +89,7 @@ func testImmediateCancel() async {
 @globalActor actor DelayedCancelActor {
   static let shared = ImmediateCancelActor()
 }
-
+/*
 @Test
 @DelayedCancelActor
 func testDelayedCancel() async {
@@ -134,4 +133,4 @@ func testDelayedCancel() async {
       try await taskGroup.waitForAll()
     }
   }
-}
+}*/

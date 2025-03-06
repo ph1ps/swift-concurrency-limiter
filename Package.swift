@@ -6,6 +6,7 @@ let package = Package(
   platforms: [.macOS(.v15), .iOS(.v18)],
   products: [
     .library(name: "Limiter", targets: ["Limiter"]),
+    .executable(name: "LimiterExec", targets: ["LimiterExec"])
   ],
   dependencies: [
     .package(url: "https://github.com/apple/swift-collections", from: "1.0.0"),
@@ -14,13 +15,18 @@ let package = Package(
   targets: [
     .target(
       name: "Limiter",
-      dependencies: [.product(name: "OrderedCollections", package: "swift-collections")]
+      dependencies: [.product(name: "OrderedCollections", package: "swift-collections")],
+      swiftSettings: [.unsafeFlags(["-parse-stdlib"])]
+    ),
+    .executableTarget(
+      name: "LimiterExec",
+      dependencies: ["Limiter"]
     ),
     .testTarget(
       name: "LimiterTests",
       dependencies: [
         "Limiter",
-        .product(name: "Clocks", package: "swift-clocks")
+        .product(name: "Clocks", package: "swift-clocks"),
       ]
     )
   ]
