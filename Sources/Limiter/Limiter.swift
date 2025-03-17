@@ -1,10 +1,7 @@
 import Synchronization
 import OrderedCollections
 
-// because of -parse-stdlib to get compiler builtins
-import Swift
-import _Concurrency
-
+@available(macOS 9999, *)
 public final class AsyncLimiter: Sendable {
   
   typealias Continuation = UnsafeContinuation<Void, Error>
@@ -81,7 +78,7 @@ public final class AsyncLimiter: Sendable {
         suspensions[id] = .cancelled
         return nil
       case .active:
-        return nil // TODO: not yet covered by unit tests
+        return nil
       case .suspended(let continuation, _):
         suspensions[id] = nil
         return .cancel(continuation)
@@ -100,7 +97,7 @@ public final class AsyncLimiter: Sendable {
       for suspension in suspensions {
         switch suspension.value {
         case .active, .cancelled:
-          continue // TODO: not yet covered by unit tests
+          continue
         case .suspended(let continuation, let task):
           suspensions[suspension.key] = .active(task)
           return .resume(continuation)
@@ -141,8 +138,7 @@ public final class AsyncLimiter: Sendable {
   let counter: Atomic<Int>
   let state: Mutex<State>
   
-  // TODO: For now, inOrder is always true
-  public init(limit: Int/*, inOrder: Bool*/) {
+  public init(limit: Int) {
     precondition(limit >= 1, "Needs at least one concurrent operation")
     counter = .init(0)
     state = .init(.init(limit: limit))
@@ -155,8 +151,8 @@ public final class AsyncLimiter: Sendable {
     
     let id = nextID()
     
-    try await withTaskPriorityEscalationHandler(isolation: isolation) {
-      try await withTaskCancellationHandler(isolation: isolation) {
+    try await withTaskPriorityEscalationHandler(operation: {
+      try await withTaskCancellationHandler(operation: {
         try await withUnsafeThrowingContinuation(isolation: isolation) { continuation in
           
           let action = state.withLock { state in
@@ -178,8 +174,7 @@ public final class AsyncLimiter: Sendable {
             break
           }
         }
-      } onCancel: {
-        
+      }, onCancel: {
         let action = state.withLock { state in
           state.cancel(id: id)
         }
@@ -190,9 +185,8 @@ public final class AsyncLimiter: Sendable {
         case .none:
           break
         }
-      }
-    } onPriorityEscalated: { priority in
-      
+      }, isolation: isolation)
+    }, onPriorityEscalated: { priority in
       let action = state.withLock { state in
         state.escalate(id: id)
       }
@@ -205,7 +199,7 @@ public final class AsyncLimiter: Sendable {
       case .none:
         break
       }
-    }
+    }, isolation: isolation)
     
     defer {
       
